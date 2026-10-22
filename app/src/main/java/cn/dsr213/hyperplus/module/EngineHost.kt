@@ -16,6 +16,7 @@ import cn.dsr213.hyperplus.BOOT_BREAKER_THRESHOLD
 import cn.dsr213.hyperplus.BOOT_HEALTHY_WINDOW_MS
 import cn.dsr213.hyperplus.EngineErrors
 import cn.dsr213.hyperplus.PrefsBridge
+import cn.dsr213.hyperplus.ScreenForm
 import cn.dsr213.hyperplus.bootBreakerTripped
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -331,19 +332,34 @@ internal object EngineHost {
                 //      （`cur == 1`）就不该被我们覆盖掉。旧版无条件写，等于篡改用户的选择。
                 //   ③ 还原成 **`restoreTarget()`（接管前原值）**，不是常量 1 —— 否则
                 //      "接管前锁着"的用户会被我们强行解开锁定。
+                // ★★ 2026-10-18（MEM-21，与引擎侧同一套判据）：优先按**当前屏自己的偏好**还原。
+                //   这里用 ScreenForm.of 现量（panic 可能发生在 AppPrefs 未 init 的场景）。
+                val form = ScreenForm.of(hostCtx)
+                val per = runCatching {
+                    Settings.System.getString(
+                        hostCtx.contentResolver,
+                        PrefsBridge.KEY_AUTO_ROTATE_PREFIX + form.storageKey,
+                    )?.trim()?.toIntOrNull()
+                }.getOrNull()
                 val target = AppPrefs.restoreTarget()
                 val cur = Settings.System.getInt(
                     hostCtx.contentResolver,
                     Settings.System.ACCELEROMETER_ROTATION,
                     1,
                 )
-                if (cur == 0 && target != AppPrefs.AUTO_ROTATE_UNTOUCHED) {
+                val restoreTo: Int? = when {
+                    per != null -> if (per == 0) null else per
+                    target != AppPrefs.AUTO_ROTATE_UNTOUCHED -> target
+                    else -> null
+                }
+                if (cur == 0 && restoreTo != null) {
                     Settings.System.putInt(
                         hostCtx.contentResolver,
                         Settings.System.ACCELEROMETER_ROTATION,
-                        target,
+                        restoreTo,
                     )
                 }
+                Log.i(TAG, "panic 还原自动旋转：形态=${form.label} 偏好=$per 写入=$restoreTo cur=$cur")
                 AppPrefs.setTakeoverActive(false)
             }
         }

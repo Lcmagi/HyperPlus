@@ -420,6 +420,10 @@ internal object SplitTrigger {
         }
         val modeSrc = if (uiOn) "来源=界面开关" else "来源=adb 调试键（$KEY=$dbg）"
         Log.i(TAG, "===== 分屏触发器开始安装（档位=$mode$modeTag；$modeSrc）=====")
+        // ★ P2-5（2026-10-12）：关键节点**同时落盘到启动摘要**（[BootReport]）—— logcat 只保
+        //   约 10 分钟，而"触发器装了吗 / 档位几 / hook 挂上没有 / 阈值多少"恰恰是用户报障时
+        //   最先需要、也最先消失的几条。⛔ 新增功能必须照做（见 `记忆库/MEM-20`）。
+        BootReport.note("分屏触发器开始安装：档位=$mode$modeTag；$modeSrc")
 
         // ① 注册折角传感器 —— **无条件**（理由见类注释那条更正：注册成本可忽略，
         //   但它在 0 档**不构成任何能力** —— 没有控制器、没有 hook，判定成立也动不了屏幕）
@@ -447,6 +451,7 @@ internal object SplitTrigger {
                     "（要开：App →「分屏增强」→ 打开「轻折加分屏」；" +
                     "或 adb shell settings put global $KEY 2 然后重启系统界面）",
             )
+            BootReport.note("分屏触发器：关闭档（界面开关=关 且 $KEY=$dbg）⇒ 不挂 hook、不进分屏")
             installed = true
             Log.i(TAG, "===== 分屏触发器安装完成（关闭档）=====")
             return
@@ -468,6 +473,9 @@ internal object SplitTrigger {
             "判定阈值：${th.encode()}（D1 触发折深=${th.d1}° / D2 回到基线=${th.d2}° / " +
                 "D3 合上判定=${th.d3}° / 窗口=${th.winMs}ms；" +
                 "A0 自动 = 最近 ${FoldJudge.A0_WINDOW_MS / 1000}s 内最大角度）",
+        )
+        BootReport.note(
+            "判定阈值：${th.encode()}（D1=${th.d1}° D2=${th.d2}° D3=${th.d3}° 窗口=${th.winMs}ms）",
         )
     }
 
@@ -523,6 +531,7 @@ internal object SplitTrigger {
                 "🌡 类未找到：$TEMP_OBSERVER_CLASS ⇒ 高温保护无法改写" +
                     "（换 ROM / 升级后包名可能变）。用户设的温度上限与开关**都不会生效**。",
             )
+            BootReport.note("🌡 高温改写未装：类未找到 $TEMP_OBSERVER_CLASS（用户设的上限/开关都不生效）")
         } else {
             var n = 0
             for (method in obsCls.declaredMethods) {
@@ -536,8 +545,10 @@ internal object SplitTrigger {
             }
             if (n == 0) {
                 Log.w(TAG, "🌡 ① 未钩上 $TEMP_OBSERVER_CLASS.$TEMP_METHOD_IS_HIGH ⇒ 「加一格」闸门拆不掉")
+                BootReport.note("🌡 ① 未钩上 $TEMP_METHOD_IS_HIGH ⇒ 「加一格」闸门拆不掉")
             } else {
                 Log.i(TAG, "🌡 ① 已钩上 $TEMP_METHOD_IS_HIGH（$n 个重载；闸门读数跟随用户配置）")
+                BootReport.note("🌡 ① 已钩上 $TEMP_METHOD_IS_HIGH（$n 个重载）")
             }
         }
 
@@ -549,6 +560,7 @@ internal object SplitTrigger {
                 "🌡 类未找到：$MSPLIT_ORG_NAME ⇒ 「弹窗 + 10 秒收分屏」拦不住" +
                     "（换 ROM / 升级后包名可能变）",
             )
+            BootReport.note("🌡 高温动作未装：类未找到 $MSPLIT_ORG_NAME ⇒ 高温仍会弹窗并收分屏")
             return
         }
         var m = 0
@@ -565,11 +577,13 @@ internal object SplitTrigger {
         }
         if (m == 0) {
             Log.w(TAG, "🌡 ②③ 未钩上 $MSPLIT_ORG_NAME 的高温入口 ⇒ 高温仍会弹窗并收掉多分屏")
+            BootReport.note("🌡 ②③ 未钩上高温入口 ⇒ 高温仍会弹窗并收掉多分屏")
         } else {
             Log.i(
                 TAG,
                 "🌡 ②③ 已钩上高温入口（$m 个：$MSPLIT_ON_HIGH_TEMP / $MSPLIT_ON_HIGH_TEMP_DIALOG_READY）",
             )
+            BootReport.note("🌡 ②③ 已钩上高温入口（$m 个）")
         }
     }
 
@@ -590,7 +604,11 @@ internal object SplitTrigger {
             return runCatching {
                 val self = thisObject(chain) ?: return r
                 if (self.javaClass.name != TEMP_OBSERVER_CLASS) return r
+                // ★ 实例**无条件先记下来**：无参那条高温入口（`onHighTemperatureDialogReady`）
+                //   要靠它读板温（2026-10-12 修 P1-1）⇒ 哪怕下面马上要放行，也得先把实例存住。
                 tempObserver = self
+                // ★ P1-4：用户没动过高温配置 ⇒ 原样放行，**一个字节都不改**（见 [thermalTouchedByUser]）
+                if (!thermalTouchedByUser()) return r
                 val t = boardTemperatureOf(self) ?: return r
                 java.lang.Boolean.valueOf(wantHigh(t))
             }.onFailure {
@@ -606,16 +624,38 @@ internal object SplitTrigger {
      *   - 该当高温 ⇒ `proceed()` 放行，**完全走系统原逻辑**（用户没关保护时行为零变化）；
      *   - 不该当 ⇒ **不 `proceed()`**（方法体整个不执行）：既不弹对话框、也不排那个
      *     10 秒定时，并顺手**撤销已经排上的**退出（清掉旧版本留下的残留）。
-     * ⚠️ 读不到板温时一律放行（宁可漏关一次，不可误关）。
+     * ⚠️ 读不到板温时一律放行（宁可漏关一次，不可误关）—— 但**必须留一行日志**（见下）。
      * ⚠️ 本 hooker 同时挂在两个方法上 ⇒ 用 `args` 是否为空区分（前者带 float，后者无参）。
+     *
+     * 🔴🔴 **2026-10-12 修 P1-1**：两个方法的**读温路径不同**，旧版把无参那条读错了：
+     * ```
+     *   onHighTemperature(float)        ⇒ 直接用实参                                   ✅
+     *   onHighTemperatureDialogReady()  ⇒ this 是 RTO，而 getBoardTemperature() 只在
+     *                                      MultiTaskingTemperatureObserver 上          🔴 恒 null ⇒ 恒放行
+     * ```
+     *   ⇒ `getMethod("getBoardTemperature")` 抛 `NoSuchMethodException`，被 [boardTemperatureOf]
+     *     的 `runCatching{}.getOrNull()` **静默吞成 null**。
+     *   ⇒ 后果：`onHighTemperatureDialogReady()` 内部那句 `reschedule exit, delay=10000`
+     *     照旧执行 —— **本类注释明写的"两条都要拦"从未做到**。
+     *   ⇒ 现在无参路径改读 [tempObserver]（[isHighTemperatureHooker] 存下的那个观察者实例）。
      */
     private val splitHighTempHooker = object : XposedInterface.Hooker {
         override fun intercept(chain: XposedInterface.Chain): Any? {
-            val t = runCatching {
-                (chain.args.firstOrNull() as? Float) ?: boardTemperatureOf(thisObject(chain))
-            }.getOrNull()
+            val arg = chain.args.firstOrNull() as? Float
+            val t = runCatching { arg ?: boardTemperatureOf(tempObserver) }.getOrNull()
 
-            if (t == null || wantHigh(t)) return chain.proceed()
+            // ⚠️ 读不到 ⇒ 放行；但**必须留一行日志** —— 这条路径从前一声不响，
+            //   "明明关了保护却还在被收分屏"就无从查起（2026-10-12 补）。
+            if (t == null) {
+                Log.i(
+                    TAG,
+                    "🌡 高温入口拿不到板温（$MSPLIT_ON_HIGH_TEMP_DIALOG_READY 无参路径；" +
+                        "观察者实例=${if (tempObserver == null) "尚未捕获" else "已捕获但读取失败"}）⇒ 放行系统原逻辑",
+                )
+                return chain.proceed()
+            }
+            // ★ P1-4：用户没动过高温配置 ⇒ 原样放行（同 [isHighTemperatureHooker]）
+            if (!thermalTouchedByUser() || wantHigh(t)) return chain.proceed()
 
             runCatching { cancelPendingHighTempExit(chain) }
                 .onFailure { Log.w(TAG, "🌡 撤销已排的高温退出失败（已吞掉）", it) }
@@ -670,6 +710,30 @@ internal object SplitTrigger {
         if (AppPrefs.splitThermalGuardOff.value) return false
         return t > AppPrefs.splitThermalLimitC.value
     }
+
+    /**
+     * 用户在界面上**到底动过没有**高温配置 —— ★★ 没动过就**一个字节都不改**系统行为。
+     *
+     * ==================== 为什么必须有这一条（2026-10-12，修 P1-4） ====================
+     * 出厂那条判定是**状态机 + 迟滞**（反编译逐字，见本文件上方引用的那段）：
+     * ```
+     * if (!mIsHighTemperature && t > 47.0f)      { mIsHighTemperature = true;  …onHighTemperature() }
+     * else if (mIsHighTemperature && t <= 45.0f) { mIsHighTemperature = false; …onNormalTemperature() }
+     * ```
+     * 而 [wantHigh] 只有**一个阈值**、**没有迟滞** ⇒ 在 `45 < t <= 47` 这段里两者结论**相反**：
+     * 出厂仍算"高温"（没降到 45 不解除），我们会说"不是" ⇒ 闸门提前放行「加一格」。
+     * 而这发生在 `THERMAL_LIMIT_C_DEFAULT = 47`、**用户什么都没改**的情况下 ——
+     * 与 [installThermalHook] KDoc 承诺的「用户没关保护时行为零变化」不符。
+     *
+     * ★ 取舍：**不去复刻出厂那台状态机**（那要猜它的置位时机，猜错就是"每 10 秒收一次分屏"
+     *   那类放大效应），而是**只在用户真的改过时才接管**：
+     *   - 用户没动过 ⇒ 两个 hooker 都原样放行 ⇒ 与出厂**逐字节一致**；
+     *   - 用户改过（关了保护 / 改了上限）⇒ 他才需要我们的判定，那时一个阈值也够用
+     *     （他要的是"我设多少就是多少"，不是出厂的 47/45 迟滞）。
+     */
+    private fun thermalTouchedByUser(): Boolean =
+        AppPrefs.splitThermalGuardOff.value ||
+            AppPrefs.splitThermalLimitC.value != AppPrefs.THERMAL_LIMIT_C_DEFAULT
 
     /**
      * 读板温（**真值**，不受我们的改写影响 —— 这正是"仪表不改被测量"的体现）。
@@ -737,7 +801,12 @@ internal object SplitTrigger {
         val ok = runCatching { installCapture(module, classLoader) }
             .onFailure { Log.e(TAG, "捕获控制器失败（已吞掉）", it) }
             .getOrDefault(false)
-        if (!ok) Log.w(TAG, "⚠️ 没能捕获控制器 ⇒ 本功能无法动作（观察日志仍会输出）")
+        if (!ok) {
+            Log.w(TAG, "⚠️ 没能捕获控制器 ⇒ 本功能无法动作（观察日志仍会输出）")
+            BootReport.note("⚠️ 分屏触发器：没能捕获控制器 ⇒ 本功能无法动作")
+        } else {
+            BootReport.note("✅ 分屏触发器：已捕获控制器，hook 就位")
+        }
     }
 
     /**
@@ -762,6 +831,7 @@ internal object SplitTrigger {
                     if (!on) return@collect
                     if (captureDone) return@collect
                     Log.i(TAG, "★ 界面开关「轻折加分屏」已打开 ⇒ 补挂分屏 hook（不必重启系统界面）")
+                    BootReport.note("★ 界面开关「轻折加分屏」已打开 ⇒ 补挂分屏 hook")
                     captureOnce(module, classLoader)
                 }
             }
@@ -1205,7 +1275,10 @@ internal object SplitTrigger {
             Log.w(TAG, "⚠️ 拿不到 WMShell 主 Handler ⇒ 放弃本次（在错线程上调会留下脏状态）")
             return
         }
-        Log.i(TAG, "→ 方向=${dir ?: "?"} ⇒ pos=$pos；投递到 WMShell 主线程 $h")
+        // ⚠️ P2-7（2026-10-12）：原来**这里**就打印「投递到 WMShell 主线程」—— 那时还没投递，
+        //   而且它在并发闸**之前** ⇒ 一次被闸丢掉的折叠会先打「投递到 WMShell 主线程」、
+        //   紧接着打「丢掉这一次」，两行互相打架（本项目最忌"日志说了一件没发生的事"）
+        //   ⇒ 移到 `h.post` **成功之后**打（见下）。
         // ★★ B3 并发闸：上一次还没飞完（`final` 还没执行）⇒ **直接丢掉这一次**。
         //   丢而不是排队：排队会让"用户折得越快、系统排得越多"，最后一次性连加好几格 ——
         //   而用户的本意只是"我折了一下"。丢掉之后的下一折照样能用（闸是一次性的，不是闩锁）。
@@ -1215,7 +1288,12 @@ internal object SplitTrigger {
             return
         }
         appending = true
-        h.post {
+        // ★ P1-2（2026-10-12）：`Handler.post` 的返回值是 **Boolean** —— Looper 正在/已经退出时
+        //   返回 false，Runnable **永远不会执行** ⇒ 下面 `finally` 不跑 ⇒ `appending`
+        //   **永久为 true** ⇒ 此后**每一次折叠都被这道闸丢掉**，而日志里只有一句
+        //   「上一次追加还在进行中」，看不到任何异常 ⇒ 用户看到"折了彻底没反应"，
+        //   排查者还会以为他在连折。⇒ 必须接住返回值、失败当场释放闸。
+        val posted = h.post {
             // ★ `finally` 是**必须的**：`doSplit` 里任何一条早退（拿不到 taskId / 上限闸 / 组织者
             //   找不到）都走 `return`，漏掉释放就变成"一次失败之后永久卡死"。
             try {
@@ -1223,6 +1301,14 @@ internal object SplitTrigger {
             } finally {
                 appending = false
             }
+        }
+        if (posted) {
+            // ★ P2-7：投递**成功之后**才说"投递到 WMShell 主线程"（见上面那段注释）
+            Log.i(TAG, "→ 方向=${dir ?: "?"} ⇒ pos=$pos；已投递到 WMShell 主线程 $h")
+        } else {
+            // ⛔ 必须**当场**释放闸：否则这一闸会一直卡到 SystemUI 重启为止（P1-2 的另一半）
+            appending = false
+            Log.w(TAG, "⚠️ 投递到 WMShell 主线程失败（Looper 正在/已经退出？）⇒ 已释放并发闸，本次放弃")
         }
     }
 
@@ -1366,23 +1452,31 @@ internal object SplitTrigger {
                 when {
                     after > n -> "（✅ 已生效）"
                     docked -> "（⚠️ 格数没涨但系统进了 dock 态 —— 它能接受，只是要用户点 App 补格）"
-                    else -> "（⚠️ 没涨且没 dock —— 系统拒了，安静放弃）"
+                    else -> "（⚠️ 没涨且没 dock —— 系统拒了，下面兜一句提示）"
                 })
-        // ★ A4：**只有"真的到顶"才打扰用户**。dock 态与"被拒"都不提示 ——
-        //   那两种情况下用户自己有下一步可做（点 App 补格 / 换个 App 再折），
-        //   弹个"到上限了"反而是误导。
-        if (after <= n && docked && max != null && after >= max) {
-            Log.i(TAG, "⇒ 判定为「已到上限」（$after/$max）⇒ 给用户一次提示")
-            reportLimitHit(after, max)
-        } else if (after <= n && !docked) {
-            // ★★ 2026-10-05 新增（§15）：这条分支原来**只打日志**。
-            //   实测它是"用户在 dock 待选态里又折了一下"的落点（`mDockedState != null ⇒ null`），
-            //   也可能是别的拒绝原因（比如"已在 dock 态"之外的几种）—— 无论哪种，
-            //   用户看到的都是"折了没反应"。
-            //   ⇒ 既然 `isDockedNow()` 那道前置闸没能拦住（说明我们读到的和系统判的不一致，
-            //     或读不到），这里**兜一句提示**，让"静默"这条路径彻底消失。
-            //   ⚠️ 两种提示共用同一个窗口与同一道去重闸 ⇒ 不会叠着弹。
-            Log.i(TAG, "⇒ 系统拒了这次追加（$n → $after）⇒ 给用户一次提示（§15 兜底）")
+        // ★ A4（2026-10-12 修订）：**只有"真的到顶"才说"到上限"** —— 那件事在第 ② 道闸
+        //   （`n >= max`）里已经报过 [reportLimitHit]，这里**不再重复**（在没到顶时弹
+        //   "到上限了"是误导）。而"格数没涨"的两种落点（进了 dock 态 / 被系统拒）
+        //   都给**同一句"请先选一个应用"**（§15 的宗旨：让"静默"这条路彻底消失）。
+        // ★ P1-3（2026-10-12）修**死代码**：原首条件是
+        //     `after <= n && docked && max != null && after >= max`  —— **恒为假**。
+        //   证明：上面第 ② 道闸已在 `max != null && n >= max` 时 `return`，
+        //   所以执行到这里必有 `max == null || n < max`：
+        //     · `max == null`   ⇒ 条件里 `max != null` 为假 ⇒ 不执行；
+        //     · `max != null`   ⇒ 必有 `n < max`，与 `after <= n` 合起来 ⇒ `after < max`
+        //                         ⇒ `after >= max` 为假 ⇒ 不执行。
+        //   ⇒ 它想覆盖的「返回 Bundle、进了 dock 态、格数却没涨」**从来没被求值过**，
+        //     而那正是用户口中的"折了没反应"。
+        //   ★ 现在按 §15 的宗旨（**让"静默"这条路彻底消失**）改成与"被拒"同路：
+        //     两种情况都只是一句"请先选一个应用"。
+        //   ⚠️ 真的"到顶"不在这里判 —— 那是第 ② 道闸的事（那里已报 [reportLimitHit]）。
+        if (after <= n) {
+            val why = if (docked) {
+                "系统进了 dock 态（它能接受，只是要用户点 App 补格）"
+            } else {
+                "系统拒了这次追加"
+            }
+            Log.i(TAG, "⇒ $why（$n → $after）⇒ 给用户一次提示（§15 兜底）")
             reportDockWait()
         }
     }

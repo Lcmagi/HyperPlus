@@ -203,7 +203,11 @@ internal object RootShell {
     private fun runShell(script: String): ShellResult? {
         for (su in SU_CANDIDATES) {
             val r = runCatching { exec(suArgs(su, script)) }.getOrNull() ?: continue
-            Log.i(TAG, "root 执行（$su）：exit=${r.code}｜${r.out.take(200)}")
+            // ★ 2026-10-18：超时（code < 0）必须**明确写出来**，别只留一个 `exit=-1`。
+            //   排查「点开就卡死」那次，光看 `exit=-1｜`（后面空）根本分不清是
+            //   "su 授权挂在弹窗"还是"子进程被管道堵死"——两种病因的下一步完全不同。
+            val codeText = if (r.code < 0) "超时(${TIMEOUT_MS}ms)被强杀" else r.code.toString()
+            Log.i(TAG, "root 执行（$su）：exit=$codeText｜${r.out.take(200)}")
             // ★★ 兜底：个别 su 不认 `-M`（会吐 usage 并 exit != 0）⇒ 退到不带 `-M` 再试一次。
             //   ⚠️ 判据是**输出里有没有 usage 字样**，而不是 exit code —— 因为
             //     "命令真的失败"和"参数被拒"都会非 0，不能靠 exit code 区分。
@@ -253,22 +257,68 @@ internal object RootShell {
     private fun suArgs(su: String, script: String): Array<String> = arrayOf(su, "-M", "-c", script)
 
     /**
-     * 跑一条命令并等它结束。
+     * 跑一条命令并等它结束 —— ★★ **必须边跑边读**（2026-10-18 修，见下）。
      *
-     * ★ 顺序刻意是「先 `waitFor(超时)`、再读输出」：本场景输出只有一两行，远小于
-     *   管道缓冲（64KB），不会因为"没读输出"把子进程堵死；换来的是一个**可靠的
-     *   时间上限** —— su 弹窗挂住时不会把协程吊死。
+     * ============================ 🔴🔴 这里曾经有一个会让整页卡死的死锁 ============================
+     * 旧实现是「**先 `waitFor(超时)`、再 `readText()`**」，注释里的理由是
+     * 「本场景输出只有一两行，远小于管道缓冲（64KB），不会因为没读输出把子进程堵死」。
+     *
+     * ⚠️ 这个前提**只对 `settings get` 这类窄命令成立**，对 `dumpsys` 完全相反：
+     * ```
+     * adb shell "dumpsys display | wc -c"   ⇒  225582     ← 220 KB，是 64KB 缓冲的 3.4 倍
+     * adb shell "time dumpsys display"      ⇒  0m00.03s   ← 命令本身只要 30 毫秒
+     * ```
+     * ⇒ 子进程写满管道缓冲后**阻塞在 write**、永远不退出 ⇒ `waitFor(15s)` 必然超时、
+     *   被强杀、返回空输出。**每一次调用都白白烧掉 15 秒。**
+     *
+     * ★ 用户报障的「**显示增强点开之后手机就会卡死**」（2026-10-18）就是它：
+     *   进页面第一件事是 `ActiveDisplay.displayIds()` → 第二路跑 `dumpsys display`
+     *   ⇒ 页面挂 15 秒，观感就是整机卡死。而且它**必然失败**（`exit=-1` + 空输出），
+     *   于是只认得出 1 块屏 ⇒「内外屏一致」退化成「只改活跃的那块」——
+     *   正是这个功能当初要消灭的那个 bug，绕了一圈又回来了。
+     *
+     * ★★ 同一条坑**不止一个受害者**：凡是输出可能超过 64KB 的命令都会中招。
+     *   诊断导出里的 `logcat -d … | tail -n 600`（600 行）也在同一量级 ——
+     *   issue #2 报告里那句「脚本 15 秒跑不完被强杀」的真正原因**极可能就是它**，
+     *   当时归因成「su 太慢」并拆成两段脚本，只缓解没根治。修这里等于一起修好。
+     *
+     * ⇒ 正确做法（现在的实现）：**独立线程持续把 stdout 抽走**，主线程才去 `waitFor`。
+     *   这样"输出体积"与"是否死锁"彻底脱钩，`TIMEOUT_MS` 才真正只在 su 授权挂着时生效。
+     *
+     * ⚠️ 超时分支返回的是**已经读到的部分**（旧实现返回空串）—— 超时现场的输出往往
+     *   正是判断"卡在哪"的唯一线索，扔掉它等于自断证据。调用方仍以 `code < 0` 判超时
+     *   （`runRaw` 会把 `code < 0` 映射成 null，所以语义不变）。
      */
     private fun exec(cmd: Array<String>): ShellResult {
         val p = ProcessBuilder(*cmd).redirectErrorStream(true).start()
         // ⚠️ 出任何事都要保证子进程不留下：走 try/finally 而不是只靠超时分支。
         return try {
+            // ★★ 边跑边读：这个线程是"防止子进程被管道缓冲堵死"的唯一保障，⛔ 别删。
+            //   `synchronized(sink)`：读线程写、主线程读，两个线程必须互斥。
+            val sink = StringBuilder()
+            val reader = Thread(Runnable {
+                runCatching {
+                    p.inputStream.bufferedReader().use { r ->
+                        val buf = CharArray(8192)
+                        while (true) {
+                            val n = r.read(buf)
+                            if (n < 0) break
+                            synchronized(sink) { sink.appendRange(buf, 0, n) }
+                        }
+                    }
+                }
+            })
+            reader.isDaemon = true
+            reader.start()
             if (!p.waitFor(TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 p.destroyForcibly()
-                return ShellResult(-1, "")
+                // 进程被杀后 read() 会立刻 EOF ⇒ 这里给的 300ms 只是收尾余量，⛔ 别调大
+                reader.join(300)
+                return ShellResult(-1, synchronized(sink) { sink.toString() })
             }
-            val text = p.inputStream.bufferedReader().use { it.readText() }
-            ShellResult(p.exitValue(), text)
+            // 进程已退出 ⇒ EOF 立刻到，正常情况这个 join 是"立即返回"
+            reader.join(2_000)
+            ShellResult(p.exitValue(), synchronized(sink) { sink.toString() })
         } catch (t: Throwable) {
             p.destroyForcibly()
             throw t

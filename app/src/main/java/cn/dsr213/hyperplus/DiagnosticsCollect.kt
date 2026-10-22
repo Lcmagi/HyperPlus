@@ -49,6 +49,12 @@ internal object DiagnosticsCollect {
         "HyperPlusSplit", "HyperPlusSplitProbe", "HyperPlusLink", "HyperPlusRoot",
         "HyperPlusChannel", "HyperPlusFgGate", "HyperPlusScreenForm", "HyperPlusSemiHint",
         "HyperPlusMain", "HyperPlusToast", "HyperPlusSqliteBin", "HyperPlusDisplaySize",
+        // ★ 2026-10-12（修 P2-6）：下面三个此前**漏了** —— 新功能/探针加了 TAG，这张表没跟上。
+        //   `HyperPlusSplitGeom` 尤其要紧：它是"复现之后才去看"的探针，而报告里那段
+        //   「未过滤的全量尾部」只覆盖最近十几分钟 ⇒ 它的日志经常已经在窗口之外。
+        //   ⛔ 纪律（`记忆库/MEM-20`）：**新增 TAG 必须同步这张表**；
+        //      漏没漏由 `tools/check_diag_tags.py` 扫源码自动核对（本地跑，不进构建）。
+        "HyperPlusSplitGeom", "HyperPlusActiveDisplay", "HyperPlusLiquidGlassBar",
         "FaceRotate",
     )
 

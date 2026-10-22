@@ -293,6 +293,13 @@ fun HyperPlusApp(
                     onOpen = ::go,
                 )
             }
+            // ★ 2026-10-12 新增：显示增强（入口在「功能」主页，紧跟「分屏增强」）。
+            //   ⚠️ 它**不需要**宿主状态（probed / hosted / hostState），而且**连引擎都不需要** ——
+            //   这一页是自己用 root 跑 `wm density`，与 LSPosed 注入的 SystemUI 引擎无关。
+            //   ⇒ ⛔ 别顺手给它传 `probed` / `hosted`：那会让人以为"引擎没起来就不能改密度"。
+            entry<Route.Display> {
+                DisplayPage(onBack = { backStack.removeLastOrNull() })
+            }
             // ★ 2026-10-06 新增：三个三级页（用户原话「可以适当增加三级菜单，要让所有功能都
             //   清晰明了」）。它们分别承接三块**内容撑不住一页**的东西：
             //   · 两份应用名单（各一两百行）—— 原来铺在二级页里，把真正的设置推出屏外；

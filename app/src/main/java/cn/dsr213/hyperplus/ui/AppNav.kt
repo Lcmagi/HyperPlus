@@ -18,6 +18,7 @@ import top.yukonga.miuix.kmp.nav.core.NavKey
  * ```
  * 功能（主页） ── 旋转增强（二级）── 应用名单（三级，2026-10-06）
  *            ├─ 分屏增强（二级，2026-10-04）── 应用名单（三级，2026-10-06）
+ *            ├─ 显示增强（二级，2026-10-12）
  *            └─ 实验功能（二级，置底）
  * 设置（主页） ── 当前状态（二级）
  *            ├─ 诊断（二级）── 运行记录（三级，2026-10-06）
@@ -112,6 +113,22 @@ sealed interface Route : NavKey {
     data object SplitScreen : Route
 
     /**
+     * 二级：**显示增强**（2026-10-12 新增，入口在「功能」主页，排在 [SplitScreen] 之后）。
+     *
+     * 用户原话：「**新增一个"显示增强"功能，提供让用户调整 dpi 的滑块，间隔为 5**」，
+     * 并点名「**二级页**」。内容只有一件事：改全局显示密度（370~440，步进 5）。
+     *
+     * ★ 为什么**不**并进别的页：它与 [Rotation]（屏幕转多少度）、[SplitScreen]（窗口怎么分）
+     *   是第三件独立的事 —— 它改的是**全局缩放**（所有 App 的所有元素大小）。
+     *   ⛔ 别因为"都叫 XX 增强"就把它塞进旋转页：那会让用户以为它只影响旋转相关界面。
+     *
+     * ⚠️ **它是本工程唯一"完全不经过引擎"的功能**：App 直接用 root 跑 `wm density`，
+     *   模块引擎既不知道也不参与，因此它**不占** `PrefsBridge` 的通道键
+     *   （见 [cn.dsr213.hyperplus.AppPrefs.displayDpi] 的注释）。
+     */
+    data object Display : Route
+
+    /**
      * 三级：**应用名单**（旋转那一份）—— 2026-10-06 新增，入口在 [Rotation] 页。
      *
      * ★ 用户原话：「**还是很乱，可以适当增加三级菜单，要让所有功能都清晰明了**」＋
@@ -192,7 +209,7 @@ internal fun tabOf(route: NavKey?): HomeTab = when (route) {
     //   漏登记的后果是"一进里面，两个入口全灭"，用户会以为掉出了导航结构。
     //   ⚠️ 2026-10-06：三级页**回来了**（RotationApps / SplitApps / DiagRecords）——
     //     它们正是当年那句"将来若再加，记得补进这一行"等着的用例 ⇒ 再加页时照此办理。
-    Route.Function, Route.Rotation, Route.Experimental, Route.SplitScreen,
+    Route.Function, Route.Rotation, Route.Experimental, Route.SplitScreen, Route.Display,
     Route.RotationApps, Route.SplitApps,
     -> HomeTab.Function
 

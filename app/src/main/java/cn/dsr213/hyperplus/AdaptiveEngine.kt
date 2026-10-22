@@ -13,6 +13,7 @@ import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
 import cn.dsr213.hyperplus.ForegroundGate.StopReason
+import cn.dsr213.hyperplus.module.BootReport
 import android.util.Size
 import android.view.Display
 import android.view.WindowManager
@@ -2879,7 +2880,12 @@ class AdaptiveEngine(
      *   理由：模式开关与接管开关语义高度重叠，两个开关会互相打架
      *   （开了自适应但忘了开接管 → 看着像坏了）。
      */
-    private fun engageTakeover() {
+    /**
+     * @param formHint 换屏回调手里那份**准确的**形态（`onScreenFormChanged(form)` 传进来）。
+     *   ⚠️ 不传时用 [AppPrefs.screenForm] —— 那条要等 300ms 落定，换屏瞬间可能还是**旧屏**，
+     *   而记账要按屏记（见 [PrefsBridge.KEY_AUTO_ROTATE_PREFIX]）。
+     */
+    private fun engageTakeover(formHint: ScreenForm? = null) {
         // ★★ 短路判据取**事实**，不取自己记的账（2026-09-29 修，用户报「很多软件是能旋转的，
         //   但被标成实测不可旋转」的根因之一）。
         //
@@ -2890,7 +2896,19 @@ class AdaptiveEngine(
         //   覆盖 ⇒ 屏幕不动 ⇒ 半自动那条**读回**会把这笔"没动"算到应用头上（见
         //   [scheduleSemiReadback]）。
         //   ⇒ 只有"账说是、且事实也是"才敢短路；否则老老实实再接管一次（幂等）。
-        if (_ui.value.takeoverOn && readAutoRotate() == 0) return
+        if (_ui.value.takeoverOn && readAutoRotate() == 0) {
+            // ★★ 2026-10-18（MEM-21）：短路**也要按当前屏重新记一次账**。
+            //   原来直接 return ⇒ 换屏后账还停在上一块屏的偏好上，而交还时会拿它写全局键
+            //   ⇒ 两屏偏好不同就串味（外屏的锁定被内屏的"未锁"盖掉）。
+            //   记账是幂等的（同值重写无副作用），代价只有一次 Settings 读。
+            val f = formHint ?: AppPrefs.screenForm.value
+            readScreenAutoRotate(f)?.let { p ->
+                AppPrefs.setRestoreTarget(
+                    if (p == 0) AppPrefs.AUTO_ROTATE_UNTOUCHED else p,
+                )
+            }
+            return
+        }
         // ★★ 前台门优先：当前前台应用在白名单里 ⇒ **不接管**（2026-09-29 修）。
         //
         //   没有这道闸时会撞上一个很隐蔽的**启动竞态**：启动序列里前台门先跑
@@ -2950,8 +2968,20 @@ class AdaptiveEngine(
         //       我们会把"欠的 1"记成"不欠"。⇒ 那道恢复逻辑**必须先于接管跑**，
         //       现在 `start()` 里的顺序就是如此（`recoverOrphanTakeover()` 在首次
         //       `engageTakeover()` 之前）。
+        // ★★★ 2026-10-18（MEM-21）：记账的**真相源**换成「当前屏自己的偏好」。
+        //   原来记的是全局键 —— 而全局键只是**当前活跃屏的投影**，换屏就变：
+        //   外屏 `_outer=0`（锁）、内屏 `_inner=1`（未锁）时，展开读到的是 1，
+        //   我们把它记成"用户开着" ⇒ 合上写回 1 ⇒ 把框架刚恢复好的外屏锁定盖掉。
+        //   ⇒ 在哪块屏接管就记哪块屏的偏好，两屏互不干扰。
+        //   ⚠️ 读不到每屏键（非 HyperOS / 非折叠）仍退回原来的全局判据，行为不变。
+        val form = formHint ?: AppPrefs.screenForm.value
+        val per = readScreenAutoRotate(form)
         AppPrefs.setRestoreTarget(
-            if (cur == 0) AppPrefs.AUTO_ROTATE_UNTOUCHED else cur,
+            when {
+                per != null -> if (per == 0) AppPrefs.AUTO_ROTATE_UNTOUCHED else per
+                cur == 0 -> AppPrefs.AUTO_ROTATE_UNTOUCHED
+                else -> cur
+            },
         )
         runCatching {
             Settings.System.putInt(
@@ -2963,19 +2993,31 @@ class AdaptiveEngine(
         // ⚠️ 别把这句话写成"关闭系统自动旋转" —— `cur == 0` 时我们**什么都没改**
         //   （用户本来就锁着，"接管"只是把账记上）。措辞必须能覆盖这两种情况，
         //   否则日志会让人以为我们动过 accel（排查时会被带偏）。
-        val touched = if (cur == 0) "本来就锁着，未改动" else "本次改为锁定"
-        event("★ 已接管旋转控制（系统自动旋转：$touched；交还时按原样恢复）")
+        val touched = when {
+            per != null && per == 0 -> "${form.label}本来就锁着，未改动"
+            per != null -> "${form.label}原本自动旋转 → 本次改为锁定"
+            cur == 0 -> "本来就锁着，未改动"
+            else -> "本次改为锁定"
+        }
+        val how = if (per != null) "按${form.label}偏好恢复" else "按记账原样恢复"
+        event("★ 已接管旋转控制（系统自动旋转：$touched；交还时$how）")
+        BootReport.note("接管旋转控制：${form.label}偏好=${per ?: "读不到"}（$touched）")
     }
 
     private fun releaseTakeover(restoreSystem: Boolean = true, quiet: Boolean = false) {
         if (!_ui.value.takeoverOn && !AppPrefs.isTakeoverActive()) return
         if (restoreSystem) {
+            // ★★★ 2026-10-18（MEM-21）：**首选「当前屏自己的偏好」**。
+            //   旋转锁定是每屏一份（HyperOS 私有的 `accelerometer_rotation_{inner,outer}`），
+            //   全局键只是当前活跃屏的投影。写回"当前屏的偏好"永远正确且幂等：
+            //   外屏锁着还 0、内屏未锁还 1，两屏互不干扰 —— 也不再依赖任何"记账"。
+            //   读不到每屏键（非 HyperOS / 非折叠）才退回下面那套 target + 三道闸。
+            val form = AppPrefs.screenForm.value
+            val per = readScreenAutoRotate(form)
             val target = AppPrefs.restoreTarget()
             val cur = readAutoRotate()
-            // ★★ 三道闸，按顺序问（2026-09-30 第二轮定案，用户原话「**不要影响外屏的旋转锁定
-            //   状态**……展开前外屏如果打开旋转锁定、展开再合上之后依然保持打开状态；
-            //   如果原本是关闭、之后也保持关闭」）。完整推导见 [AppPrefs.AUTO_ROTATE_UNTOUCHED]。
-            //
+            // ★★ 三道闸（2026-09-30 第二轮定案，用户原话「**不要影响外屏的旋转锁定状态**」）。
+            //   它们现在只在**读不到每屏键**时兜底；完整推导见 [AppPrefs.AUTO_ROTATE_UNTOUCHED]。
             //   ① `target == -1`（哨兵）⇒ **我们从来没改过它** ⇒ 现在也没资格写。
             //      ⛔ 这就是上一版不收敛的那条路：用户本来就锁着（0），我们"接管"时其实
             //        什么都没做，却在交还时写回 0 —— 看着无害，实际上把用户后来手动打开的
@@ -2985,25 +3027,29 @@ class AdaptiveEngine(
             //   ③ 以上都不成立（`target >= 0` 且 `cur == 0`）⇒ 确实还是"我们关的那个状态"
             //      ⇒ 才按原样还原。
             val skipReason = when {
+                per != null -> null
                 target == AppPrefs.AUTO_ROTATE_UNTOUCHED ->
                     "这项设置本来就是我们没动过的状态，保持原样"
                 cur != 0 ->
                     "你自己改过它（当前是开启），按你的设置保持"
                 else -> null
             }
+            val restoreTo = per ?: target
             if (skipReason == null) {
                 runCatching {
                     Settings.System.putInt(
-                        context.contentResolver, Settings.System.ACCELEROMETER_ROTATION, target,
+                        context.contentResolver, Settings.System.ACCELEROMETER_ROTATION, restoreTo,
                     )
                 }
                 // ⚠️ 别写成"= 开启" —— 目标值可能是 0（用户原本就锁着）。
                 if (!quiet) {
                     event(
-                        "已交还系统自动旋转（恢复为接管前的样子：" +
-                            if (target == 0) "锁定" else "自动旋转开启" + "）",
+                        "已交还系统自动旋转（" +
+                            (if (per != null) "${form.label}自己的偏好：" else "恢复为接管前的样子：") +
+                            (if (restoreTo == 0) "锁定" else "自动旋转开启") + "）",
                     )
                 }
+                BootReport.note("交还旋转控制：${form.label} → 写 ${restoreTo}（per=$per target=$target）")
             } else if (!quiet) {
                 event("已交还系统自动旋转（未改动：$skipReason）")
             }
@@ -3020,6 +3066,10 @@ class AdaptiveEngine(
      */
     private fun recoverOrphanTakeover() {
         if (!AppPrefs.isTakeoverActive()) return
+        // ★★ 2026-10-18（MEM-21）：与 [releaseTakeover] 同一套判据 —— 优先按
+        //   **当前屏自己的偏好**还原。该屏偏好本来就是锁（0）⇒ 这个 0 是用户的、不是我们的残留。
+        val form = AppPrefs.screenForm.value
+        val per = readScreenAutoRotate(form)
         val target = AppPrefs.restoreTarget()
         val cur = readAutoRotate()
         // ★★ 判据是 `cur == 0`，即"**确实还是我们留下的那个状态**"（2026-09-30 修）。
@@ -3034,18 +3084,24 @@ class AdaptiveEngine(
         // ★★ 第二道闸 `target != 哨兵`（2026-09-30 第二轮）：哨兵意味着"我们**从没改过**
         //   accel"（接管时它本来就是 0）⇒ 那这个 0 是**用户自己锁的**，不还。
         //   ⛔ 少了这道闸就是上面那条不收敛的路：把用户的 0 当成"我们的残留"再写一次。
-        val weOwe = target != AppPrefs.AUTO_ROTATE_UNTOUCHED
-        if (cur == 0 && weOwe) {
+        val restoreTo: Int? = when {
+            per != null -> if (per == 0) null else per
+            target == AppPrefs.AUTO_ROTATE_UNTOUCHED -> null
+            else -> target
+        }
+        if (cur == 0 && restoreTo != null) {
             runCatching {
                 Settings.System.putInt(
-                    context.contentResolver, Settings.System.ACCELEROMETER_ROTATION, target,
+                    context.contentResolver, Settings.System.ACCELEROMETER_ROTATION, restoreTo,
                 )
             }
             Recovery.fixed = true
             event(
-                "⚠️ 上次没有正常退出，系统自动旋转被留在锁定状态 → 已恢复为" +
-                    (if (target == 0) "锁定" else "自动旋转开启"),
+                "⚠️ 上次没有正常退出，系统自动旋转被留在锁定状态 → 已按" +
+                    (if (per != null) "${form.label}偏好" else "记账原值") + "恢复为" +
+                    (if (restoreTo == 0) "锁定" else "自动旋转开启"),
             )
+            BootReport.note("孤儿接管恢复：${form.label} 写 $restoreTo（per=$per target=$target）")
         }
         AppPrefs.setTakeoverActive(false)
     }
@@ -3054,6 +3110,20 @@ class AdaptiveEngine(
     object Recovery {
         @Volatile var fixed = false
     }
+
+    /**
+     * 读**指定屏**的自动旋转偏好（HyperOS 私有每屏键，见 [PrefsBridge.KEY_AUTO_ROTATE_PREFIX]）。
+     *
+     * ★ 返回 `null` = **读不到**（老系统 / 非折叠屏 / 键不存在）⇒ 调用方必须退回
+     *   [AppPrefs.restoreTarget] 那套旧判据。
+     * ⛔ 别把 null 当成 0：「读不到」与「读到锁」的后果完全不同（前者什么都不该写）。
+     */
+    private fun readScreenAutoRotate(form: ScreenForm): Int? = runCatching {
+        Settings.System.getString(
+            context.contentResolver,
+            PrefsBridge.KEY_AUTO_ROTATE_PREFIX + form.storageKey,
+        )?.trim()?.toIntOrNull()
+    }.getOrNull()
 
     private fun readAutoRotate(): Int = runCatching {
         Settings.System.getInt(
@@ -3662,7 +3732,9 @@ class AdaptiveEngine(
         //      解锁才发现方向不对，且完全无从自查。
         //      这条路径**不排读回**（见 [scheduleSemiReadback]），所以不会误报，
         //      危害小于另外两处；但"写了等于没写还报成功"仍是 bug，判据统一按事实来。
-        if (!_ui.value.takeoverOn || readAutoRotate() != 0) engageTakeover()
+        // ★★ 2026-10-18：把回调手里那份**准确的**形态传下去（`_form` 要等 300ms 落定，
+        //   换屏瞬间可能还是旧屏 ⇒ 会按错屏记账，见 [PrefsBridge.KEY_AUTO_ROTATE_PREFIX]）。
+        if (!_ui.value.takeoverOn || readAutoRotate() != 0) engageTakeover(form)
         if (readAutoRotate() != 0) {
             event(
                 "形态切换 → ${form.label}：⚠️ 自动旋转不在本模块手里" +

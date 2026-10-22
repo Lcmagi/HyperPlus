@@ -691,6 +691,164 @@ object AppPrefs {
     const val HINT_MS_MAX = 60_000
     const val HINT_MS_DEFAULT = 3_000
 
+    // ================================================================ 显示增强（DPI）
+
+    /**
+     * 「显示增强」的 DPI 取值边界与默认值（用户 2026-10-12 拍板）。
+     *
+     * ★★ **为什么下限是 370 而不是更低**（这条是硬约束，⛔ 别随手放宽）：
+     *   形态判定（[ScreenForm]）是 `最小边像素 × 160 ÷ 密度` 与阈值 **512dp** 比。
+     *   本机外屏 1168px ⇒
+     *   - dpi **370** ⇒ `1168×160÷370 = 505.1dp`（余量 **+6.9**）✅
+     *   - dpi **365** ⇒ `512.0dp`（正好压线）
+     *   - dpi **360** ⇒ `519.1dp` ⇒ **外屏被误判成内屏**（合上只用外屏时，转屏会套用
+     *     内屏那一套档位）—— 这正是 09-28 定为「硬要求」不许破的那条
+     *     （见 [ScreenForm] 类注释「转屏不会让你的模式凭空换一档」）。
+     *
+     * ✅ **已真机实证（2026-10-12）**：[ScreenForm] 走 `display.getRealMetrics()`，
+     *   它在 `wm density` 覆盖下**仍返回物理密度 440**（`dumpsys window` 的 `init=` 列
+     *   在覆盖 370 时纹丝不动），⇒ 170 那个换算基准**不受本功能影响**，370 安全。
+     *   ⛔ 若将来把 [ScreenForm] 改成读 `Configuration.densityDpi`（会跟随覆盖），
+     *     这条结论立刻作废 —— 那时必须改用像素判形态。
+     *
+     * ⚠️ 语义提醒（用户 2026-10-12 原话「DPI 数值越大，画面越小，所以没错」）：
+     *   用户说的"下限/上限"指的是**画面大小**语义。⇒ dpi **440 = 画面最小**（滑块左端）、
+     *   dpi **370 = 画面最大**（滑块右端）。本文件的 MIN/MAX 一律按 **dpi 数值**命名。
+     */
+    const val DISPLAY_DPI_MIN = 370
+    const val DISPLAY_DPI_MAX = 440
+    const val DISPLAY_DPI_STEP = 5
+
+    /**
+     * 默认 dpi —— **440**（用户 2026-10-12 拍板）。
+     *
+     * ⚠️ 它**不等于**"进页面时滑块的初值"：本机的 `Override density` 现在是 400
+     *   （被系统「显示大小」覆盖过），所以滑块初值必须**读实际生效值**（见 [displayDpi]），
+     *   ⛔ 硬编码 440 会在已覆盖的机器上显示错误的当前状态。
+     *   「默认 440」真正的含义是：**「恢复默认」按钮的目标值**。
+     */
+    const val DISPLAY_DPI_DEFAULT = 440
+
+    /**
+     * 把任意 dpi 归一成**合法的档位值**（先夹紧到 [DISPLAY_DPI_MIN]..[DISPLAY_DPI_MAX]，
+     * 再吸附到 [DISPLAY_DPI_STEP] 的整数倍）。
+     *
+     * ★ 与 [snapHintMs] 同一个道理：把归一放在**唯一入口**（[setDisplayDpi] 与两个读盘函数），
+     *   这样无论值从滑条、还是被手改的配置文件进来，落盘的都恒是合法档位。
+     * ★ 吸附用四舍五入（`(v + step/2) / step * step`），不是向下取整 ——
+     *   滑条给回来的值本来就该落在档位上，四舍五入能容下浮点误差。
+     */
+    fun snapDisplayDpi(v: Int): Int =
+        ((v.coerceIn(DISPLAY_DPI_MIN, DISPLAY_DPI_MAX) + DISPLAY_DPI_STEP / 2) /
+            DISPLAY_DPI_STEP * DISPLAY_DPI_STEP)
+            .coerceIn(DISPLAY_DPI_MIN, DISPLAY_DPI_MAX)
+
+    /**
+     * 「显示增强」的用户**草稿值**（dpi）。
+     *
+     * ★★ **它不是"当前系统密度"** —— 这是本功能最容易搞混的一点。
+     *   本功能是**确认制**（用户 2026-10-12 点名「不要实时生效，改完之后按一下应用才生效」）：
+     *   - 这个流 = **用户拖到哪儿**（草稿），只在按「应用」时才写进系统；
+     *   - 系统当前真实密度 = 每次进页面时 `wm density -d <id>` **现读**
+     *     （实现是 `ui/DisplayPage.kt` 里的私有 `readDensity`，⛔ 不在这里 —— AppPrefs
+     *     只负责"存/取/写系统"，"怎么读回来显示"是界面的事）。
+     *   ⇒ ⛔ 别把这个值当成"现在的密度"显示给用户（那会在没按应用时撒谎）。
+     *
+     * ⚠️ 初值是 [DISPLAY_DPI_DEFAULT]，但**页面挂载时会用系统实际值覆盖它**（照 [PrefsBridge]
+     *   那类"配置先行"的做法）—— 见 `ui/DisplayPage.kt` 的 `LaunchedEffect`。
+     */
+    private val _displayDpi = MutableStateFlow(DISPLAY_DPI_DEFAULT)
+
+    /**
+     * 用户上次「应用」的 dpi（App 侧私有键，⛔ **不进 [PrefsBridge]**）。
+     *
+     * ★ 为什么不走 [PrefsBridge]：本功能**完全不需要引擎参与** ——
+     *   它只是 App 用 root 跑一条 `wm density`，模块引擎既不该知道、也管不着。
+     *   按「功能」的判据（能点、能选、能生效），它不依赖引擎，所以**不占通道键**，
+     *   [cn.dsr213.hyperplus.ConfigChannel] 的快照里也不会出现它（省一次全量快照的字节）。
+     *   ⚠️ 但也因此它**不会被引擎镜像带走** —— 这是有意的，⛔ 别为了"统一"把它塞进通道。
+     *
+     * ⚠️ 它是**持久化记忆**（下次进页面滑块落在上次的位置），不是"系统当前的密度"
+     *   —— 用户可能在别处（系统设置/命令行）改过密度，两者会不一致，
+     *   所以页面挂载时**系统实际值优先**。
+     */
+    private val KEY_DISPLAY_DPI = "display_dpi"
+
+    /**
+     * 设「显示增强」的草稿 dpi —— **只改本地 state，⛔ 不碰系统**。
+     *
+     * ★★ **这个方法刻意不写系统**：确认制的全部意义就在这里 ——
+     *   滑条的 `onValueChange` 是**高频探索动作**（找"哪个大小舒服"可能要来回拖十几次），
+     *   若每次停顿都写一次 `wm density`，就会每次触发一轮 WMS 配置变更（界面重绘/闪），
+     *   体验极差。⇒ 真正的写入在 [applyDisplayDpi]。
+     *   ⛔ 别在这里顺手加 `RootShell` 调用 —— 那会把确认制悄悄变成实时制。
+     *
+     * ⚠️ 值没变就一个字节都不写（与 [setSplitUnfoldDir] 同型：无条件写会掩盖别处的漏推）。
+     */
+    fun setDisplayDpi(v: Int) {
+        val snapped = snapDisplayDpi(v)
+        if (_displayDpi.value == snapped) return
+        _displayDpi.value = snapped
+        prefs?.edit()?.putInt(KEY_DISPLAY_DPI, snapped)?.apply()
+    }
+
+    /**
+     * 「应用」按钮的入口 —— 把草稿 dpi **真正写进系统**（本功能唯一的写系统动作）。
+     *
+     * ★★ **必须逐屏下发**（2026-10-12 真机实测发现的硬坑）：
+     *   `wm density` 的签名是 `density [reset|DENSITY] [-d DISPLAY_ID] [-u UNIQUE_ID] [-r]`
+     *   —— **不带 `-d` 时它只作用于 display 0**（当前主屏）。实测：
+     *   ```
+     *   wm density 370            ⇒ 内屏仍是 400、只有外屏变 370
+     *   wm density 370 -d 1       ⇒ 只有内屏变
+     *   ```
+     *   ⇒ 用户要的「内外屏一致」**只能靠对每块屏各发一次命令**实现。
+     *   ⛔ 只发一条 `wm density N` 的后果：**外屏变了、内屏没变**，
+     *     用户在内屏看就是"点了应用完全没反应"——一个必被报成 bug 的行为。
+     *
+     * ⚠️ **displayId 由调用方枚举传入**，⛔ 这里不写死 0/1：
+     *   按 [[MEM-12]]「`display 0` 是当前主屏的**动态别名**」，本机虽是外=0/内=1，
+     *   但别的地方（折叠状态变化、投屏）可能不同 ⇒ 枚举当前所有 display 再逐个下发。
+     *
+     * @param displayIds 要把 dpi 应用到哪些 display（调用方从 `DisplayManager` 枚举）
+     * @return 是否**至少有一条**写入成功（全失败 ⇒ false，界面据此决定要不要报错）
+     */
+    suspend fun applyDisplayDpi(displayIds: List<Int>): Boolean {
+        val dpi = _displayDpi.value
+        if (displayIds.isEmpty()) return false
+        var anyOk = false
+        for (id in displayIds) {
+            // ⚠️ 逐条执行、逐条判成败：一块屏失败不该拦着另一块（用户至少能看到半边生效）
+            val ok = RootShell.runRaw("wm density $dpi -d $id") != null
+            if (ok) anyOk = true
+            Log.i(TAG, "显示增强：wm density $dpi -d $id ⇒ ${if (ok) "成功" else "失败"}")
+        }
+        return anyOk
+    }
+
+    /**
+     * 「恢复系统默认」按钮的入口 —— 清掉覆盖密度（回物理值）。
+     *
+     * ★ 用 `wm density reset`（与 [applyDisplayDpi] 同样必须**逐屏下发**，理由见那边）。
+     * ⚠️ **它会改变用户当前看到的界面**：本机现在是 `Override 400`，
+     *   reset 之后回到物理 **440** ⇒ 界面**变小**（不是变回 400）。
+     *   这是正确行为（"恢复默认"就该回系统默认），但界面必须**回读后如实显示**，
+     *   ⛔ 别让用户以为"点了没反应"。
+     *
+     * ⚠️ 也**不必**再调 [setDisplayDpi]：reset 之后系统值由调用方回读，
+     *   再把结果喂回 slider（见 `ui/DisplayPage.kt`）。
+     */
+    suspend fun resetDisplayDpi(displayIds: List<Int>): Boolean {
+        if (displayIds.isEmpty()) return false
+        var anyOk = false
+        for (id in displayIds) {
+            val ok = RootShell.runRaw("wm density reset -d $id") != null
+            if (ok) anyOk = true
+            Log.i(TAG, "显示增强：wm density reset -d $id ⇒ ${if (ok) "成功" else "失败"}")
+        }
+        return anyOk
+    }
+
     /**
      * 把任意毫秒值归一成**合法的整秒毫秒值**（先夹紧、再四舍五入到整秒）。
      *
@@ -935,6 +1093,17 @@ object AppPrefs {
 
     /** 半自动按钮等待时长（毫秒，1000~60000）。界面滑条读它，引擎侧由配置通道灌入 */
     val hintMs: StateFlow<Int> = _hintMs.asStateFlow()
+
+    /**
+     * 「显示增强」的**草稿 dpi**（370~440，步进 5）—— 界面滑条读它。
+     *
+     * ★★ **它是草稿不是现状**（确认制，见 [_displayDpi] 的注释）：
+     *   用户拖到哪里就是哪里，**直到按「应用」才写系统**。
+     * ⚠️ **引擎侧不读它** —— 与 [hintMs] 不同，本功能不占配置通道、不进 [PrefsBridge]，
+     *   因为它压根不需要引擎参与（App 自己跑 `wm density` 就完事）。
+     *   ⛔ 别看到这里"少了一条通道键"就以为是漏了，那是**有意的**（见 [_displayDpi]）。
+     */
+    val displayDpi: StateFlow<Int> = _displayDpi.asStateFlow()
 
     /** 「预览旋转按钮」的请求（值 = `<时间戳>|<目标方向>`）。引擎 `collect` 它并弹一次按钮 */
     val hintTestReq: StateFlow<String> = _hintTestReq.asStateFlow()
@@ -1191,6 +1360,9 @@ object AppPrefs {
         _splitTriggerOn.value = p.getBoolean(PrefsBridge.SPLIT_TRIGGER_ON, false)
         // 读的时候也归一一次：老版本写进去的（如 7927）/ 文件被手改过的值都可能越界或非整秒
         _hintMs.value = snapHintMs(p.getInt(PrefsBridge.HINT_MS, HINT_MS_DEFAULT))
+        // 「显示增强」草稿 dpi：读的时候也归一（文件被手改过可能落在档位之间或越界）
+        // ★ 注意它**不是系统当前密度** —— 那要现跑 `wm density` 读，见 DisplayPage
+        _displayDpi.value = snapDisplayDpi(p.getInt(KEY_DISPLAY_DPI, DISPLAY_DPI_DEFAULT))
         _hintTestReq.value = p.getString(PrefsBridge.HINT_TEST, null).orEmpty()
         // ★ 校准分步进度（2026-10-03）：跨 App 重启存活，这里读回来。
         //   ⚠️ 紧接着的 `refreshCalibFromSettings()` 会按系统状态再对齐一次
@@ -1521,6 +1693,8 @@ object AppPrefs {
         _splitTriggerOn.value = p.getBoolean(PrefsBridge.SPLIT_TRIGGER_ON, false)
         // 读的时候也归一一次：老版本写进去的（如 7927）/ 文件被手改过的值都可能越界或非整秒
         _hintMs.value = snapHintMs(p.getInt(PrefsBridge.HINT_MS, HINT_MS_DEFAULT))
+        // 「显示增强」草稿 dpi —— 与 [reloadFromPrefs] 那条**成对**（两条读盘路径都要灌）
+        _displayDpi.value = snapDisplayDpi(p.getInt(KEY_DISPLAY_DPI, DISPLAY_DPI_DEFAULT))
         // ★ 预览请求同样要灌进内存流 —— 引擎侧 `collect` 它才会弹按钮。
         _hintTestReq.value = p.getString(PrefsBridge.HINT_TEST, null).orEmpty()
         loadWhitelist { k -> p.getString(k, null) }

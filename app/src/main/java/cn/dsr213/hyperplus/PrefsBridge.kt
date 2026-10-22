@@ -435,7 +435,13 @@ internal object PrefsBridge {
     /** 标定：相位偏移（度），使「人脸正立」对应 0°。同上，引擎写 */
     const val OFFSET = "calib_offset"
 
-    /** 交还系统自动旋转时的目标值（恒 1，理由见 [AppPrefs.RESTORE_AUTO_ROTATE]） */
+    /**
+     * 交还系统自动旋转时的**兜底**目标值（接管前读到的值；`-1` = 我们没动过它）。
+     *
+     * ⚠️ 2026-10-18（MEM-21）起它**只是兜底**：首选是当前屏自己的
+     *   [KEY_AUTO_ROTATE_PREFIX] 偏好（那才是用户视角的真值）。理由见那条常量。
+     *   （旧版注释写「恒 1」，早已随 v2 的哨兵改造失效，别再照它理解。）
+     */
     const val RESTORE = "restore_auto_rotate"
 
     /** 是否处于「我们正接管」状态 —— 持久化，进程被杀后下次启动能还原 */
@@ -530,6 +536,26 @@ internal object PrefsBridge {
      * ★ 单一真值：引擎侧那个同名常量直接引用这一条，别在两处各写一份字符串。
      */
     const val KEY_USER_ROTATION_PREFIX = "user_rotation_"
+
+    /**
+     * ★★★ **HyperOS「每块屏各自的自动旋转（旋转锁定）偏好」键前缀**（不是我们的键，是 WMS 的）。
+     *
+     * 完整键 = 前缀 + [ScreenForm.storageKey] ⇒ `accelerometer_rotation_inner` / `_outer`。
+     * ⚠️ AOSP 标准里只有全局的 `ACCELEROMETER_ROTATION`，这两个是 HyperOS 私有扩展
+     *   ⇒ 非 HyperOS / 非折叠机型上**根本不存在**（读出来是 null，调用方据此退回旧的记账判据）。
+     *
+     * ★★ 2026-10-18（MEM-21）：**旋转锁定不是一份，是每屏一份** —— 与
+     *   [KEY_USER_ROTATION_PREFIX] 的三份**同构**。实测（本机 10-12，双向都验过）：
+     *   · `accelerometer_rotation=0`、`_inner=1`、`_outer=0`，而 `dumpsys window` 的
+     *     `mUserRotationMode{Inner,Outer}` 与这两个键**一一对应**；
+     *   · **写全局键不会改动这两个键**（往返 0→1→0 实测不变）⇒ 它们是**干净的「用户偏好」**；
+     *     而全局键只是**当前活跃屏的投影** —— 换屏就变。
+     * ⇒ 接管 / 交还必须**按屏读写**。拿全局键当"用户意愿"记账，两屏偏好不同就必然串味：
+     *   外屏锁定（`_outer=0`）会被内屏的 `_inner=1` 盖成"未锁" —— 这正是 10-12 用户报的回归
+     *   （「外屏开启旋转锁定，展开内屏再合上，外屏被切换成关闭锁定」）。
+     * ⛔ 别把它与方向槽位 [KEY_USER_ROTATION_PREFIX] 混起来：那是**方向**，这是**锁定开关**。
+     */
+    const val KEY_AUTO_ROTATE_PREFIX = "accelerometer_rotation_"
 
     // ---------------------------------------------------------------- 状态键（完整名，引擎 → App）
 

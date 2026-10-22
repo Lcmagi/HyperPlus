@@ -82,6 +82,14 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <!--
+      UWB_RANGING（dangerous，运行时可申请）—— 左右手识别的门槛（2026-10-19）。
+      ✅ 字节码实证：AOSP 标准通道只校验这一个（`UwbInjector.enforceUwbRangingPermissionForPreflight`）；
+         NXP 私有的 `VendorUwbOemService` **0 次** `enforceCallingPermission`。
+      ⇒ 这也是「UWB 不必住 SystemUI」的依据之一（SystemUI 的 UWB_PRIVILEGED 是 0 条）。
+    -->
+    <uses-permission android:name="android.permission.UWB_RANGING" />
+
+    <!--
       ⚠️ 这里**没有** WRITE_SETTINGS / SYSTEM_ALERT_WINDOW / FOREGROUND_SERVICE —— 不是漏了，
          是单引擎架构（2026-09-28）让它们全部失去用途：
 
@@ -203,6 +211,42 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          ★★ 左右手识别的**信号定标探针**（2026-10-18，临时调试入口，不进正式导航）。
+
+          为什么单独一个 Activity、且不在 <intent-filter> 里挂 LAUNCHER：
+            它是"把 5 种握持姿势下的硬件原始信号落成 CSV"的一次性工具，**不做任何判定**。
+            ⇒ 刻意不接入 `HyperPlusApp` 的 Route 表：那套导航是给用户看的，
+              调试工具混进去会让"功能表"失真（本项目对这一点很敏感）。
+
+          `exported="true"` 的用途只有一个：`adb shell am start -n
+          cn.dsr213.hyperplus/.HandProbeActivity` 能直接拉起（非 exported 的 Activity
+          用 adb 起会抛 SecurityException）。
+          安全边界：它只做两件事 —— 读传感器、往**自己**的外部私有目录写 CSV；
+          没有任何系统写入、没有对外通信，被别的应用误启也无副作用。
+
+          ⚠️ 定标结束后此 Activity 应当删除（或收进 debug 源集），⛔ 别留在正式包里。
+        -->
+        <!-- ⚠️ configChanges 是**本轮必须的**：点「开始采集」后一展开内屏，屏幕尺寸/密度/方向
+             同时变 ⇒ 没声明就会 onDestroy → onCreate ⇒ 采集归零（2026-10-18 实测）。
+             ⛔ 别删；同时 App 侧采集状态已搬到 HandProbeSession，即使被强制重建也不丢数据。 -->
+        <activity
+            android:name=".HandProbeActivity"
+            android:exported="true"
+            android:label="左右手信号探针"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|density|navigation|uiMode" />
+
+        <!-- UWB 宿主能力探针（2026-10-19）—— 只读，不建会话。
+             证「这个进程能不能拿到 NXP 雷达服务」，判据见记忆库 MEM-24。
+             用法：adb shell am start -n cn.dsr213.hyperplus/.UwbHostProbeActivity -->
+        <activity
+            android:name=".UwbHostProbeActivity"
+            android:exported="true"
+            android:label="UWB 宿主探测"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|density|navigation|uiMode" />
 
         <!-- 控制中心快捷开关（两态：自动旋转 / 自适应旋转）。
              permission=BIND_QUICK_SETTINGS_TILE 是必需的：只有系统 SystemUI

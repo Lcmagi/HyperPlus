@@ -144,6 +144,34 @@
     <string name="function_split_title">Split screen enhancements</string>
     <string name="function_split_summary">Direction of the 2-app split: %1$s</string>
     <string name="split_title">Split screen enhancements</string>
+    <!-- ================================================ Display boost (2026-10-12) -->
+    <!-- ★★★ The slider is CONFIRM-BASED: dragging only edits a draft, nothing is written
+         to the system until the user taps Apply. Do NOT rename the buttons to something
+         that sounds live, and do not add a live-preview path.
+         ★ Direction is INVERTED on purpose: a larger dpi means SMALLER content, so the
+         left end of the slider is 440 (smallest) and the right end is 370 (largest).
+         The range is 370..440 in steps of 5. The 370 floor is a HARD limit, not a taste
+         choice — below ~365 the outer screen is misdetected as the inner one. See MEM-19. -->
+    <string name="function_display_title">Display boost</string>
+    <string name="function_display_summary">Global display density: %1$d dpi</string>
+    <string name="display_title">Display boost</string>
+    <string name="display_section_size">Display size</string>
+    <string name="display_dpi_title">Display density</string>
+    <string name="display_dpi_summary">Larger dpi = smaller content. Applies to both screens.</string>
+    <string name="display_dpi_value">%1$d dpi</string>
+    <string name="display_dpi_current">Currently in effect: %1$s</string>
+    <string name="display_dpi_pending">Pending (not applied yet): %1$d dpi</string>
+    <string name="display_dpi_unknown">Unknown</string>
+    <string name="display_dpi_mixed">Screens don\'t match — tap Apply to sync them</string>
+    <string name="display_btn_apply">Apply</string>
+    <string name="display_btn_reset">Reset to default</string>
+    <string name="display_notes_title">About this setting</string>
+    <string name="display_note_global">This is a global setting. It changes the size of everything on both the inner and the outer screen.</string>
+    <string name="display_note_semantic">A larger dpi makes the content smaller (more fits on screen); a smaller dpi makes it larger.</string>
+    <string name="display_note_confirm">Changes take effect only after you tap Apply, and apply immediately — no reboot needed.</string>
+    <string name="display_toast_applied">Density applied</string>
+    <string name="display_toast_reset">Reset to system default</string>
+    <string name="display_toast_failed">Failed to apply. Check that root access is granted.</string>
     <!-- ================================================ Fold to split (2026-10-07) -->
     <!-- ★★★ This group is the fix for issue #1: the feature previously had only an
          adb-set Settings.Global switch and no UI entry, so for users it was permanently
@@ -153,7 +181,7 @@
          PrefsBridge.SPLIT_TRIGGER_ON. -->
     <string name="split_trigger_section">Fold to split</string>
     <string name="split_trigger_title">Fold to add a split</string>
-    <string name="split_trigger_summary">A light fold squeezes the current app into half the screen and adds one more pane. Still works after you switch apps.</string>
+    <string name="split_trigger_summary">Only a light fold completed within 1 second splits the screen: the current app is squeezed into half and one more pane is added. Still works after you switch apps.</string>
     <string name="split_dir_section">Direction of the 2-app split</string>
     <string name="split_dir_note">When a light fold adds another split pane, which side the current app stays on.</string>
     <string name="split_dir_left">To the left</string>

@@ -260,6 +260,9 @@ internal object DisplaySize {
  */
 internal object ActiveDisplay {
 
+    /** 日志标签 —— 与 [ScreenFormLog] 分开，方便按 `logcat -s` 只看认屏这件事 */
+    private const val TAG = "HyperPlusActiveDisplay"
+
     /**
      * 这块 `Display` 属于内屏还是外屏 —— 按**物理最小边 dp** 判，与 [ScreenForm] 同一个阈值。
      *
@@ -293,6 +296,77 @@ internal object ActiveDisplay {
      *   再退 `DEFAULT_DISPLAY`）—— **不要**把 null 当成 0
      */
     fun rotationOf(context: Context, form: ScreenForm): Int? = forForm(context, form)?.rotation
+
+    /**
+     * 当前**所有** display 的 id（外屏 + 内屏，按系统给的顺序）。
+     *
+     * ★★ 存在的唯一理由：**`wm density` 不带 `-d` 时只作用于 display 0**（2026-10-12 实测，
+     *   见 [[MEM-19]] §5）⇒ 要"内外屏一致"只能**对每块屏各发一次 `-d <id>`**，
+     *   而这个动作必须知道"现在到底有哪几块屏"。
+     *
+     * ★★ **⛔ 绝不写死 `0`/`1`** —— 按 [[MEM-12]]「`display 0` ＝『当前主屏』动态别名」，
+     *   它会随折叠形态/投屏重绑到不同物理屏。本机虽是外=0/内=1，但这是**观测结果不是规格**。
+     *   ⛔ 也别只取 `DEFAULT_DISPLAY`（那就只改一块屏，正是要避免的 bug）。
+     *
+     * 🔴🔴 **必须双路取并集（2026-10-12 实证，这是本函数最容易踩的坑）**：
+     *   `DisplayManager.displays` 在**应用进程**里**只会返回当前活跃的那块屏**！
+     *   真机实测（App 日志）：
+     *   ```
+     *   HyperPlusActiveDisplay: 显示增强：当前 display id = [0]（共 1 块）
+     *   ```
+     *   当时系统的实际状态是 `Display 0`(外屏, ON) + `Display 1`(内屏, OFF) ——
+     *   内屏因为 `state OFF` 被 `DisplayManager` 过滤掉了。
+     *   ⚠️ 而它恰好是折叠机的**常态**（平时只用一块屏）⇒ 若只看 `DisplayManager`，
+     *     就会退化成"永远只改一块屏"，正是这个函数要消灭的 bug（只是换了个成因）。
+     *   系统侧的真相用 `dumpsys display` 拿得到（第二路），所以**两路取并集**。
+     *
+     * ⚠️ 这里**不筛掉熄屏的屏**：密度是持久设置，对熄着的屏下发同样有意义 ——
+     *   用户合上盖子再用外屏时就能立刻对上，否则会出现"展开时改了、合上后发现外屏没跟上"
+     *   的割裂感。（这条正是上一条 🔴 存在的原因。）
+     *
+     * ⚠️ 第二路要 root（`su -c`）。本功能的写入本来就全程走 root
+     *   （`wm density` 需 root），所以这里**不引入新的权限要求**。
+     * ⚠️ 它是 **`suspend`**（第二路要跑 root 命令）⇒ 调用方须在协程里
+     *   （本功能的两个调用点都在 `LaunchedEffect` / `scope.launch` 内，天然满足）。
+     *
+     * @return display id 列表（升序）；两路都读不到时返回空列表
+     *   （调用方据此报错，⛔ 别回退成 `listOf(0)` —— 那会静默只改一块屏）
+     */
+    suspend fun displayIds(context: Context): List<Int> {
+        // ---- 第一路：DisplayManager（快、不要 root，但**只给活跃屏**）
+        val fromManager = runCatching {
+            context.getSystemService(DisplayManager::class.java)
+                ?.displays?.map { it.displayId }
+                ?: emptyList()
+        }.getOrDefault(emptyList())
+
+        // ---- 第二路：dumpsys display（要 root，但**给全部 logical display**）
+        // ★★ `| grep` 这一段**不是优化、是必需**（2026-10-18）：
+        //   整份 `dumpsys display` 实测 **225,582 字节（220KB）**，而我们只要那几行
+        //   `  Display N:`（grep 之后 114 字节）。把它整份读回 App 纯属浪费，
+        //   而且旧版 `RootShell.exec` 正是被这种大输出**堵死管道**才导致整页卡 15 秒。
+        //   ⚠️ 正则**两边必须一致**（这里是 shell 的 grep、下面是 Kotlin 的 Regex），
+        //     改一处就要改另一处，否则"拿得到 id 却解析不出来"。
+        val fromDumpsys = runCatching {
+            RootShell.runRaw("dumpsys display | grep -E '^  Display [0-9]+:'")
+                ?.let { out ->
+                    Regex("^\\s{2}Display (\\d+):", RegexOption.MULTILINE)
+                        .findAll(out)
+                        .map { it.groupValues[1].toInt() }
+                        .toList()
+                }
+                ?: emptyList()
+        }.getOrDefault(emptyList())
+
+        // ★ 并集 + 升序：顺序稳定，日志可比对（⛔ 别用 toSet 直接 toList，顺序会随机）
+        val ids = (fromManager + fromDumpsys).distinct().sorted()
+        // ★ 诊断日志（2026-10-12）：本功能唯一的外部依赖就是"到底有哪几块屏"。
+        //   一旦这里少了屏，症状是"应用后只有一块屏变了"——而那种症状从 UI 上**看不出来**，
+        //   只能靠这行日志（上面那条 🔴🔴 就是这么抓出来的）。
+        //   ⛔ 排查完别删，它每次进页面只打一行。
+        Log.i(TAG, "显示增强：display id = $ids（Manager=$fromManager, dumpsys=$fromDumpsys）")
+        return ids
+    }
 
     /**
      * 诊断：把**每一块** display 的「形态 + id + rotation」打成一行。

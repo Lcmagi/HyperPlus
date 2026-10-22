@@ -67,6 +67,11 @@ internal fun FunctionPage(
     // ★ 2026-10-04：分屏入口的摘要要报**当前取值**（"2分屏展开方向：朝左"），
     //   与上面那条旋转摘要同一个形状 —— 主页只给"一眼摘要"，细节在它自己的二级页里。
     val splitDir by AppPrefs.splitUnfoldDir.collectAsState()
+    // ★ 2026-10-12：显示增强入口的摘要报**当前密度**（"全局显示密度：400 dpi"），
+    //   同上两条 —— 主页只给一眼摘要。
+    //   ⚠️ 取的是**草稿流**不是现读系统值：主页每次重组都跑 root 命令不可接受，
+    //     完整理由见 [Route.Display] 与那个入口处的注释。
+    val displayDpi by AppPrefs.displayDpi.collectAsState()
     // ⚠️ `ctx` / `splitOn` 这两个局部值已随「引擎状态格」一起搬去 [SettingsPage]（2026-10-06）——
     //   它们只服务那一格（读 `Settings.Global` 判断分屏开没开），本页不再需要。
     //   ⛔ 别在这里重新算一遍：凡是"引擎现在算不算开着"的判断**只允许有一处**。
@@ -139,6 +144,18 @@ internal fun FunctionPage(
                         stringResource(splitDir.labelRes),
                     ),
                     onClick = { onOpen(Route.SplitScreen) },
+                )
+                // ★ 显示增强入口（2026-10-12 新增）：位置紧跟在"分屏"之后。
+                //   ★ 摘要报**当前生效的密度**（读系统值），不是"点进去能改什么" ——
+                //     与上面两条一致：**主页只给状态，不给说明书**。
+                //   ⚠️ 它读的是 [AppPrefs.displayDpi]（草稿流）而非现跑 `wm density`：
+                //     主页每次重组都跑一条 root 命令是不可接受的（且引擎侧无此数据）。
+                //     草稿在进过 DisplayPage 后已对齐系统值，误差仅限"在别处改过密度
+                //     且没进过本页"这一种情况 —— 为此在主页常驻 root 轮询不划算。
+                ArrowPreference(
+                    title = stringResource(R.string.function_display_title),
+                    summary = stringResource(R.string.function_display_summary, displayDpi),
+                    onClick = { onOpen(Route.Display) },
                 )
             }
 

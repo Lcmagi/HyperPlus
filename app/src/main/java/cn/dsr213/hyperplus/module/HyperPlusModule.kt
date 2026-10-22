@@ -95,8 +95,23 @@ class HyperPlusModule : XposedModule() {
      *   它保证"哪怕用户手滑把作用域勾到别的应用，那边也不会跑起引擎来"。
      */
     override fun onPackageReady(param: XposedModuleInterface.PackageReadyParam) {
-        if (param.packageName != TARGET_PKG) return
+        runCatching {
+            when (param.packageName) {
+                TARGET_PKG -> onSystemUiReady(param)
+                UWB_HOST_PKG -> onUwbHostReady(param)
+                else -> Unit
+            }
+        }.onFailure { Log.e(TAG, "onPackageReady 分发异常（已吞掉）", it) }
+    }
 
+    /**
+     * 系统界面进程：引擎、方向、分屏全在这一支。
+     *
+     * ★ 只认 `com.android.systemui`（与 `META-INF/xposed/scope.list` 一致）。
+     *   作用域理论上已经把我们限死，但**这道判断必须留着** ——
+     *   它保证"哪怕用户手滑把作用域勾到别的应用，那边也不会跑起引擎来"。
+     */
+    private fun onSystemUiReady(param: XposedModuleInterface.PackageReadyParam) {
         runCatching {
             val injected =
                 "★★★ HyperPlus 模块注入成功 package=${param.packageName} " +
@@ -123,6 +138,105 @@ class HyperPlusModule : XposedModule() {
             runCatching { boot(loader) }
                 .onFailure { Log.e(TAG, "模块初始化失败（已吞掉，不影响 SystemUI）", it) }
         }, START_DELAY_MS)
+    }
+
+    // ======================================================== UWB 宿主（2026-10-19 新增）
+
+    /**
+     * `androidx.core.uwb.backend` 进程 —— 左右手识别（UWB 雷达）的宿主。
+     *
+     * ============================ 为什么是它，不是 SystemUI ============================
+     * ✅ 2026-10-19 本机 `dumpsys` 实测：
+     *   - `com.android.systemui`：`UWB_PRIVILEGED` **0 条** ⇒ 放那边根本跑不动；且 PSS 已 814 MB。
+     *   - `androidx.core.uwb.backend`：`UWB_PRIVILEGED` + `UWB_RANGING` 均已授予；
+     *     `PERS #92 ... (fixed)` / `oom=-800`（persistent 杀不掉）；RSS 仅 15 MB。
+     * 判据见 `docs/模块进程划分_2026-10-19.md` 与记忆库 MEM-24。
+     *
+     * ============================ 纪律（比 SystemUI 更严） ============================
+     * 这是 **fixed persistent** 进程：这里的未捕获异常 ⇒ 进程被杀 ⇒ 系统立刻重拉 ⇒
+     * 最坏形成重启循环。所以：
+     *   - 入口只打日志，**不装 hook、不碰服务、不建会话**（本阶段仅取证）；
+     *   - 所有探测各自 `runCatching`，异常只记不抛。
+     */
+    private fun onUwbHostReady(param: XposedModuleInterface.PackageReadyParam) {
+        val injected =
+            "★★★ UWB 宿主注入成功 package=${param.packageName} " +
+                "process=$processName first=${param.isFirstPackage} " +
+                "myPid=${Process.myPid()} myUid=${Process.myUid()}"
+        Log.i(TAG_UWB, injected)
+        BootReport.note(injected)
+
+        val loader = param.classLoader
+
+        // 延迟取 Context：此刻 Application 可能还没建好（与 SystemUI 那支同理）
+        Handler(Looper.getMainLooper()).postDelayed({
+            runCatching { probeUwbHost(loader) }
+                .onFailure { Log.e(TAG_UWB, "UWB 宿主探测异常（已吞掉）", it) }
+        }, UWB_PROBE_DELAY_MS)
+    }
+
+    /**
+     * 第一阶段只做**只读探测**，回答三个问题 —— 答案决定后续方案是否成立：
+     *   ① 本进程能否看见 `com.nxp.uwb.NxpUwbManager`（类可见性；它不在 BOOTCLASSPATH）
+     *   ② 能否拿到 `VendorUwbOemService` 的 binder（服务可达性 / SELinux）
+     *   ③ 能否解析 `INxpUwbOemService` 描述符（AIDL 通道前提）
+     * ⛔ 一律"只解析、不调用" —— 任何有副作用的动作都留给下一阶段。
+     */
+    private fun probeUwbHost(loader: ClassLoader, resetReport: Boolean = true) {
+        val ctx = runCatching { hostApplication(loader) }.getOrNull()
+        if (ctx != null) {
+            // ⚠️ 在 SystemUI 里复用时**不许 reset** —— 那会把本次启动已有的摘要整份重写掉
+            if (resetReport) {
+                runCatching { BootReport.reset(ctx) }
+                    .onFailure { Log.w(TAG_UWB, "BootReport.reset 失败（已吞掉）", it) }
+            }
+            BootReport.note("宿主上下文：${ctx.packageName} filesDir=${ctx.filesDir}")
+        } else {
+            BootReport.note("宿主上下文：拿不到（Application 尚未就绪）")
+        }
+        BootReport.note("宿主身份：pid=${Process.myPid()} uid=${Process.myUid()}")
+
+        // ① 类可见性
+        val nxp = runCatching {
+            Class.forName("com.nxp.uwb.NxpUwbManager", false, loader)
+        }
+        val cls1 = if (nxp.isSuccess) {
+            "可见 ${nxp.getOrNull()?.classLoader}"
+        } else {
+            "不可见 " + (nxp.exceptionOrNull()?.javaClass?.simpleName ?: "?")
+        }
+        BootReport.note("① NxpUwbManager：$cls1")
+        Log.i(TAG_UWB, "① NxpUwbManager：$cls1")
+
+        // ② binder 可达性
+        val binderRes = runCatching {
+            val sm = Class.forName("android.os.ServiceManager")
+            val m = sm.getDeclaredMethod("getService", String::class.java)
+            m.isAccessible = true
+            m.invoke(null, "VendorUwbOemService")
+        }
+        val b = binderRes.getOrNull()
+        val bTxt = when {
+            !binderRes.isSuccess -> "异常 " + binderRes.exceptionOrNull()?.javaClass?.simpleName
+            b == null -> "null（服务未注册或被拦）"
+            else -> "ok ${b.javaClass.name}"
+        }
+        BootReport.note("② VendorUwbOemService：$bTxt")
+        Log.i(TAG_UWB, "② VendorUwbOemService：$bTxt")
+
+        // ③ AIDL 描述符
+        val iface = runCatching {
+            Class.forName("com.nxp.uwb.oemService.INxpUwbOemService", false, loader)
+        }
+        val iTxt = if (iface.isSuccess) {
+            "ok"
+        } else {
+            "不可见 " + (iface.exceptionOrNull()?.javaClass?.simpleName ?: "?")
+        }
+        BootReport.note("③ INxpUwbOemService：$iTxt")
+        Log.i(TAG_UWB, "③ INxpUwbOemService：$iTxt")
+
+        BootReport.note("—— 探测结束（本阶段不调用任何服务）——")
     }
 
     // ==================================================================== 初始化
@@ -181,6 +295,20 @@ class HyperPlusModule : XposedModule() {
         // ⑤ ★ 引擎搬进 SystemUI —— 本模块的主线任务
         runCatching { EngineHost.start(hostCtx, appCtx, classLoader) }
             .onFailure { Log.e(TAG, "EngineHost 启动失败（已吞掉）", it) }
+
+        // ⑤b UWB 服务可达性探测（2026-10-19，**默认关**，按需打一次）
+        //   用途：`VendorUwbOemService` 的 binder **只在 platform_app 域可 find**；
+        //   本 App 进程（untrusted_app）实测返回 null（见 UwbHostProbeActivity 的探测结果）。
+        //   这一支用来确认「platform_app 域到底能不能 bind」，从而判断 uwb.backend 宿主是否可行。
+        //   触发：adb shell settings put global UWB_PROBE_KEY 1（跑完自动复位）
+        runCatching {
+            val cr = hostCtx.contentResolver
+            if (Settings.Global.getInt(cr, UWB_PROBE_KEY, 0) != 0) {
+                Settings.Global.putInt(cr, UWB_PROBE_KEY, 0)
+                Log.i(TAG_UWB, "收到 UWB 探测信号 → 在宿主进程内跑一次")
+                probeUwbHost(classLoader, resetReport = false)
+            }
+        }.onFailure { Log.e(TAG, "UWB 探测失败（已吞掉）", it) }
 
         // ⑥ ★ 分屏观察钩子（2026-10-04 新增，**默认关闭**的调查工具）。
         //   ⚠️ 位置：**在引擎之后**。引擎是主线，探针是临时工具 —— 两者的顺序表达优先级，
@@ -281,6 +409,22 @@ class HyperPlusModule : XposedModule() {
         // ★ 2026-10-03：这里原先有一个 `APP_PKG` 常量，现已删除 —— 包名只留一份真值
         //   [ConfigChannel.APP_PKG]（本类在 [doBoot] 里直接引用它）。
         private const val TARGET_PKG = "com.android.systemui"
+
+        /**
+         * UWB 雷达宿主（2026-10-19）。
+         * ✅ 本机实测：persistent/fixed、`UWB_PRIVILEGED`+`UWB_RANGING` 已授予、RSS 15 MB。
+         * ⛔ 别换成 SystemUI —— 它 `UWB_PRIVILEGED` 为 0 条。
+         */
+        private const val UWB_HOST_PKG = "androidx.core.uwb.backend"
+
+        /** UWB 支线日志标签（与主线分开，便于 `logcat -s` 精确过滤） */
+        private const val TAG_UWB = "HyperPlusUwb"
+
+        /** UWB 宿主取 Context 的延迟（persistent 进程启动路径同样不能压活） */
+        private const val UWB_PROBE_DELAY_MS = 1_500L
+
+        /** 置 1 则下次 SystemUI 启动时在宿主进程内跑一次 UWB 服务可达性探测（跑完自动复位） */
+        private const val UWB_PROBE_KEY = "hyperplus_uwb_probe"
 
         /** 开发用复测通道的设置键（见 installSelfCheckTrigger） */
         private const val SELFCHECK_KEY = "hyperplus_selfcheck"

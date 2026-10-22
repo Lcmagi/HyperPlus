@@ -71,6 +71,16 @@ LSPosed 模块，为小米 18 Fold 提供系统未内置的功能。引擎常驻
 
 「轻折加分屏」默认关闭，可在「实验功能」中开启。上限调至 8 个后需重启一次系统界面。
 
+#### 显示增强
+
+| 功能 | 需要 root |
+|---|---|
+| 全局显示密度 370–440 dpi（步进 5），内外屏同时生效 | ⚠️ 需要 |
+| 拖动滑条只改草稿，点「应用」才写入系统 | |
+| 一键恢复系统默认（440 dpi） | ⚠️ 需要 |
+
+数值越大画面越小。下限 370 是硬限制：再低外屏会被系统判定成内屏。
+
 ### 故障排查
 
 **系统界面反复重启，甚至无法进入桌面** —— 在 LSPosed 中禁用本模块，然后重启系统界面（或整机）。若管理器无法打开，等待 LSPosed 自动禁用；若系统无法启动，进入安全模式（开机时按住音量减）后禁用。
@@ -154,6 +164,16 @@ Three modes, switchable at any time:
 | Up to 8 apps at once (system default: 6) | ⚠️ yes |
 
 "Fold to add a split" is off by default — turn it on under "Experimental". Reboot System UI once after raising the limit to 8.
+
+#### Display boost
+
+| Feature | Root |
+|---|---|
+| Global display density 370–440 dpi (steps of 5), applied to both screens | ⚠️ yes |
+| Dragging only edits a draft; nothing is written until you tap Apply | |
+| Reset to the system default (440 dpi) | ⚠️ yes |
+
+Larger dpi means smaller content. The 370 floor is a hard limit — below roughly 365 the outer screen is misdetected as the inner one.
 
 ### Troubleshooting
 
