@@ -1,5 +1,13 @@
 # HyperPlus
 
+## Lcmagi 的小米 18 Fold 自用分支
+
+基于原作者 [213DEE/HyperPlus](https://github.com/213DEE/HyperPlus) 提交 `e5fc108`，沿用 [GNU AGPL v3](LICENSE)。原作者及第三方署名保留。此分支由 Lcmagi 独立维护。
+
+2026-11-20 修改：半自动旋转按钮按当前屏幕短边缩放（425dp 外屏对应 48dp，608dp 内屏对应 58dp），点击区域至少 48dp。可见倒计时按实际经过时间推进，绘制间隔约 33ms。折叠切换时合并重复定位，主设置页与通用子页内容最大宽度为 640dp。
+
+构建环境为 JDK 21、Android SDK 37。设置 `JAVA_HOME` 后运行 `./gradlew -Dorg.gradle.java.home="$JAVA_HOME" :app:testDebugUnitTest :app:assembleDebug`。当前修改尚待小米 18 Fold 真机回归及耗电对照测试。
+
 **为小米 18 Fold 补齐系统缺失的实用功能。**
 
 ![License](https://img.shields.io/badge/license-AGPL--3.0-blue)

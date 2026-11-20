@@ -1,3 +1,4 @@
+// Lcmagi 自用分支修改于 2026-11-20，沿用上游 AGPL-3.0。
 package cn.dsr213.hyperplus
 
 import android.content.Context
@@ -562,7 +563,7 @@ internal class RotateHintOverlay(
      * 设备实测（`wm density` / `dumpsys display`，两块屏 `densityDpi` 都是 440）：
      * 密度 **2.75x**；内屏 1672×2364px ⇒ 最小宽度 **608dp**；外屏 1168×1712px ⇒ **425dp**。
      * 所以同一颗按钮在两块屏上占屏宽的比例差着一大截（密度相同 ⇒ 绝对 dp 做不到"看着一样大"）。
-     * ⇒ 可见圆按**屏宽比例**缩放（[HintSizePolicy.VISUAL_W_RATIO]），两屏才可比。
+     * ⇒ 可见圆按**屏宽比例**缩放（[HintSizePolicy.visualDp]），两屏才可比。
      *
      * ★ **2026-09-29 的当前结果**（用户报"按钮有点小"之后调的，两档都有单测钉住）：
      *   - 内屏 608dp ⇒ `608 × 62/608` = **62dp**（撞上限），占屏宽 10.2%；
@@ -1069,7 +1070,7 @@ internal class RotateHintOverlay(
                         // 时间到、用户没点 ⇒ 收掉按钮、**不旋转**
                         hide()
                     } else {
-                        postOnAnimation(this)
+                        postDelayed(this, minOf(33L, dur - el))
                     }
                 }
             }
@@ -1187,8 +1188,20 @@ internal class RotateHintOverlay(
             //      折叠态下内外屏尺寸差着一大截（本机 1672×2364 ↔ 1168×1712），
             //      只算一次很可能钉在中间态上。
             //   第二次是"等落定后再确认一遍"，幂等 —— 尺寸没变时 updateViewLayout 无副作用。
-            post { relayout() }
-            postDelayed({ relayout() }, RELAYOUT_SETTLE_MS)
+            removeCallbacks(settleLayout)
+            removeCallbacks(refreshLayout)
+            post(refreshLayout)
+            postDelayed(settleLayout, RELAYOUT_SETTLE_MS)
+        }
+
+        private val refreshLayout = Runnable { if (view === this) relayout() }
+        private val settleLayout = Runnable { if (view === this) relayout() }
+
+        override fun onDetachedFromWindow() {
+            removeCallbacks(refreshLayout)
+            removeCallbacks(settleLayout)
+            cancelCountdown()
+            super.onDetachedFromWindow()
         }
 
         override fun onDraw(canvas: Canvas) {
